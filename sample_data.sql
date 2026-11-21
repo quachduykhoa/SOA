@@ -1,10 +1,35 @@
 -- ============================================================================
---  DỮ LIỆU MẪU CHO 3 BÀI THỰC HÀNH: TH1 (auth) - TH3 (product) - TH4 (order)
+--  DỮ LIỆU MẪU CHO 4 BÀI THỰC HÀNH: TH1 (auth) - TH3 (product) - TH4 (order) - TH5 (report)
 --  Chạy trong Supabase SQL Editor (role postgres).
 --
---  !!! CẢNH BÁO: script XOÁ SẠCH dữ liệu hiện có của 3 bảng bên dưới
---      rồi nạp lại, để id bắt đầu từ 1 và tổng tiền khớp nhau.
+--  !!! CẢNH BÁO: script XOÁ SẠCH dữ liệu hiện có của các bảng bên dưới
+--      rồi nạp lại, để id bắt đầu từ 1 và số liệu khớp nhau hoàn toàn.
 -- ============================================================================
+
+-- Đảm bảo các schema tồn tại
+CREATE SCHEMA IF NOT EXISTS auth_service;
+CREATE SCHEMA IF NOT EXISTS products_service;
+CREATE SCHEMA IF NOT EXISTS orders_service;
+CREATE SCHEMA IF NOT EXISTS report_service;
+
+-- Tạo sẵn bảng cho TH5 (phòng trường hợp Hibernate chưa kịp auto-create)
+CREATE TABLE IF NOT EXISTS report_service.orders_reports (
+    id SERIAL PRIMARY KEY,
+    order_id INT NOT NULL,
+    total_revenue DECIMAL(10, 2),
+    total_cost DECIMAL(10, 2),
+    total_profit DECIMAL(10, 2)
+);
+
+CREATE TABLE IF NOT EXISTS report_service.product_reports (
+    id SERIAL PRIMARY KEY,
+    order_report_id INT REFERENCES report_service.orders_reports(id) ON DELETE CASCADE,
+    product_id INT NOT NULL,
+    total_sold INT,
+    revenue DECIMAL(10, 2),
+    cost DECIMAL(10, 2),
+    profit DECIMAL(10, 2)
+);
 
 BEGIN;
 
@@ -21,11 +46,11 @@ INSERT INTO auth_service.users (user_name, password) VALUES
   ('tranthib',   'e99a18c428cb38d5f260853678922e03');  -- abc123
 
 -- ----------------------------------------------------------------------------
--- 2) TH3 - products.products   (id sẽ là 1..5)
+-- 2) TH3 - products_service.products   (id sẽ là 1..5)
 -- ----------------------------------------------------------------------------
-TRUNCATE TABLE products.products RESTART IDENTITY CASCADE;
+TRUNCATE TABLE products_service.products RESTART IDENTITY CASCADE;
 
-INSERT INTO products.products (name, description, price, quantity, created_at, updated_at) VALUES
+INSERT INTO products_service.products (name, description, price, quantity, created_at, updated_at) VALUES
   ('Áo thun nam',     'Cotton 100%, size M-L-XL',        150000.00,  50, now() - interval '10 days', now() - interval '10 days'),
   ('Quần jean nữ',    'Jean slim fit, size 26-32',       450000.00,  30, now() - interval '9 days',  now() - interval '9 days'),
   ('Giày sneaker',    'Da lộn, phối màu trắng xanh',     890000.00,  20, now() - interval '8 days',  now() - interval '8 days'),
@@ -52,25 +77,70 @@ INSERT INTO orders_service.order_items
   (2, 4, 'Balo laptop',   1, 320000.00, 320000.00),
   (3, 2, 'Quần jean nữ',  2, 450000.00, 900000.00);
 
+-- ----------------------------------------------------------------------------
+-- 4) TH5 - report_service.orders_reports + product_reports
+--    - Khớp hoàn toàn với đơn hàng 1 và đơn hàng 2 ở trên
+--    - Chi phí (cost) giả định là giá vốn (~60-70% giá bán)
+--    - profit = revenue - cost
+-- ----------------------------------------------------------------------------
+TRUNCATE TABLE report_service.product_reports, report_service.orders_reports
+  RESTART IDENTITY CASCADE;
+
+-- Báo cáo cho Đơn hàng 1 (total_revenue = 570,000 khớp đơn 1)
+INSERT INTO report_service.orders_reports (order_id, total_revenue, total_cost, total_profit) VALUES
+  (1, 570000.00, 380000.00, 190000.00),
+  (2, 1210000.00, 820000.00, 390000.00);
+
+-- Chi tiết sản phẩm trong báo cáo:
+-- Báo cáo 1 (đơn 1): Áo thun nam (id 1, bán 2 cái) & Mũ lưỡi trai (id 5, bán 3 cái)
+-- Báo cáo 2 (đơn 2): Giày sneaker (id 3, bán 1 cái) & Balo laptop (id 4, bán 1 cái)
+INSERT INTO report_service.product_reports 
+  (order_report_id, product_id, total_sold, revenue, cost, profit) VALUES
+  -- Thuộc order_report_id = 1
+  (1, 1, 2, 300000.00, 200000.00, 100000.00),
+  (1, 5, 3, 270000.00, 180000.00,  90000.00),
+  -- Thuộc order_report_id = 2
+  (2, 3, 1, 890000.00, 600000.00, 290000.00),
+  (2, 4, 1, 320000.00, 220000.00, 100000.00);
+
 COMMIT;
 
 -- ============================================================================
 --  KIỂM TRA SAU KHI CHẠY
 -- ============================================================================
 
--- 3 user, 5 sản phẩm, 3 đơn, 5 chi tiết
-SELECT 'users' AS bang, count(*) FROM auth_service.users
-UNION ALL SELECT 'products', count(*) FROM products.products
-UNION ALL SELECT 'orders', count(*) FROM orders_service.orders
-UNION ALL SELECT 'order_items', count(*) FROM orders_service.order_items;
+-- Thống kê số lượng dòng ở cả 4 service
+SELECT '1. auth (users)' AS service_table, count(*) FROM auth_service.users
+UNION ALL SELECT '2. products', count(*) FROM products_service.products
+UNION ALL SELECT '3. orders', count(*) FROM orders_service.orders
+UNION ALL SELECT '3. order_items', count(*) FROM orders_service.order_items
+UNION ALL SELECT '4. orders_reports', count(*) FROM report_service.orders_reports
+UNION ALL SELECT '4. product_reports', count(*) FROM report_service.product_reports;
 
--- Đối chiếu total_amount với tổng chi tiết: cột khop phải là true hết
-SELECT o.id,
+-- 1) Đối chiếu total_amount của TH4 với tổng chi tiết order_items
+SELECT o.id AS order_id,
        o.customer_name,
        o.total_amount,
        SUM(i.total_price)                    AS tinh_lai_tu_items,
-       (o.total_amount = SUM(i.total_price)) AS khop
+       (o.total_amount = SUM(i.total_price)) AS khop_th4
 FROM orders_service.orders o
 JOIN orders_service.order_items i ON i.order_id = o.id
 GROUP BY o.id, o.customer_name, o.total_amount
 ORDER BY o.id;
+
+-- 2) Đối chiếu total_revenue của TH5 với chi tiết product_reports và đơn hàng TH4
+SELECT r.id AS report_id,
+       r.order_id,
+       o.total_amount                        AS tien_don_hang_th4,
+       r.total_revenue                       AS doanh_thu_bao_cao,
+       SUM(p.revenue)                        AS tong_doanh_thu_sp,
+       (r.total_revenue = SUM(p.revenue) AND r.total_revenue = o.total_amount) AS khop_doanh_thu,
+       r.total_cost                          AS tong_chi_phi,
+       SUM(p.cost)                           AS tong_chi_phi_sp,
+       (r.total_cost = SUM(p.cost))          AS khop_chi_phi,
+       r.total_profit                        AS loi_nhuan
+FROM report_service.orders_reports r
+JOIN report_service.product_reports p ON p.order_report_id = r.id
+JOIN orders_service.orders o ON o.id = r.order_id
+GROUP BY r.id, r.order_id, o.total_amount, r.total_revenue, r.total_cost, r.total_profit
+ORDER BY r.id;
